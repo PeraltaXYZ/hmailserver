@@ -34,6 +34,11 @@
 #include "RuleApplier.h"
 #include "RuleResult.h"
 
+
+#include "../common/BO/IMAPFolders.h"
+#include "../common/BO/IMAPFolder.h"
+
+
 #ifdef _DEBUG
 #define DEBUG_NEW new(_NORMAL_BLOCK, __FILE__, __LINE__)
 #define new DEBUG_NEW
@@ -177,8 +182,9 @@ namespace HM
 
    Returns true if message should be delivered, false if it should be aborted.
    */
-   bool 
-   LocalDelivery::LocalDeliveryPreProcess_(std::shared_ptr<const Account> account, std::shared_ptr<Message> accountLevelMessage, const String &sOriginalAddress, std::vector<String> &saErrorMessages)
+
+   bool
+      LocalDelivery::LocalDeliveryPreProcess_(std::shared_ptr<const Account> account, std::shared_ptr<Message> accountLevelMessage, const String& sOriginalAddress, std::vector<String>& saErrorMessages)
    {
       SendAutoReplyMessage_(account, original_message_);
 
@@ -193,10 +199,38 @@ namespace HM
 
       if (!forwarder.PerformForwarding(account, accountLevelMessage))
       {
-         String sMessage = Formatter::Format("SMTPDeliverer - Message {0}: The message was not delivered to {1} because a forward was set up for the account.",
-                                                original_message_->GetID(), account->GetAddress());
+         bool bMovedToTrash = false;
 
-         return false;
+         // FIX: Use 'GetForwardKeepOriginal' instead of 'GetForwardKeepCopy'
+         if (!account->GetForwardKeepOriginal())
+         {
+            // We need to cast away const-ness to access GetFolders()
+            std::shared_ptr<Account> pNonConstAccount = std::const_pointer_cast<Account>(account);
+
+            // Try to find the Trash folder
+            std::shared_ptr<IMAPFolder> pTrash = pNonConstAccount->GetFolders()->GetItemByName("Trash");
+
+            if (pTrash)
+            {
+               // Set the folder ID to Trash so it saves there instead of Inbox
+               accountLevelMessage->SetFolderID(pTrash->GetID());
+               bMovedToTrash = true;
+            }
+         }
+
+         // If we didn't move it to Trash (or Trash didn't exist), use original behavior (delete)
+         if (!bMovedToTrash)
+         {
+            // Log why it wasn't delivered
+            String sMessage = Formatter::Format("SMTPDeliverer - Message {0}: The message was not delivered to {1} because a forward was set up for the account.",
+               original_message_->GetID(), account->GetAddress());
+
+            // Return false to abort delivery (deleting the file)
+            return false;
+         }
+
+         // If bMovedToTrash is true, we fall through. 
+         // Returning true at the end of this function causes DeliverToLocalAccount_ to save the message.
       }
 
       // Do the final delivery of the message.
