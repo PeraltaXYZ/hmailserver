@@ -11,6 +11,8 @@
 #include "../common/BO/Message.h"
 #include "../common/BO/MessageRecipient.h"
 #include "../common/BO/MessageRecipients.h"
+#include "../common/BO/IMAPFolders.h"
+#include "../common/BO/IMAPFolder.h"
 
 #include "../common/Cache/CacheContainer.h"
 #include "../common/Cache/AccountSizeCache.h"
@@ -18,6 +20,7 @@
 #include "../common/Persistence/PersistentMessageRecipient.h"
 #include "../common/Persistence/PersistentMessage.h"
 #include "../common/Persistence/PersistentAccount.h"
+#include "../Common/Persistence/PersistentIMAPFolder.h"
 
 #include "../common/Tracking/ChangeNotification.h"
 #include "../common/Tracking/NotificationServer.h"
@@ -27,16 +30,13 @@
 #include "../common/Util/MessageUtilities.h"
 
 #include "../IMAP/MessagesContainer.h"
+#include "../IMAP/IMAPFolderContainer.h"
 
 #include "SMTPConfiguration.h"
 #include "SMTPVacationMessageCreator.h"
 #include "SMTPForwarding.h"
 #include "RuleApplier.h"
 #include "RuleResult.h"
-
-
-#include "../common/BO/IMAPFolders.h"
-#include "../common/BO/IMAPFolder.h"
 
 
 #ifdef _DEBUG
@@ -201,24 +201,80 @@ namespace HM
       {
          bool bMovedToTrash = false;
 
-         // FIX: Use 'GetForwardKeepOriginal' instead of 'GetForwardKeepCopy'
+
          if (!account->GetForwardKeepOriginal())
          {
-            // We need to cast away const-ness to access GetFolders()
             std::shared_ptr<Account> pNonConstAccount = std::const_pointer_cast<Account>(account);
 
-            // Try to find the Trash folder
-            std::shared_ptr<IMAPFolder> pTrash = pNonConstAccount->GetFolders()->GetItemByName("Trash");
+            // Safety check: Ensure GetFolders() actually returns a valid pointer
+            std::shared_ptr<IMAPFolders> pFolders = pNonConstAccount->GetFolders();
 
-            if (pTrash)
+            if (pFolders) // <--- CRITICAL CHECK
             {
-               // Set the folder ID to Trash so it saves there instead of Inbox
-               accountLevelMessage->SetFolderID(pTrash->GetID());
-               bMovedToTrash = true;
+               // 1. Try to find the Trash folder
+               std::shared_ptr<IMAPFolder> pTrash = pFolders->GetItemByName("Trash");
+
+               // 2. If folder not found, create it
+               if (!pTrash)
+               {
+                  // Create trash folder
+                  std::shared_ptr<IMAPFolder> pNewFolder = std::make_shared<IMAPFolder>();
+
+                  pNewFolder->SetAccountID(pNonConstAccount->GetID());
+                  pNewFolder->SetParentFolderID(-1);
+                  pNewFolder->SetFolderName("Trash");
+                  pNewFolder->SetIsSubscribed(true);
+
+                  // Try to save the trash folder
+                  if (PersistentIMAPFolder::SaveObject(pNewFolder))
+                  {
+                     // 1. Drop the global caches so new connections fetch from the DB
+                     Cache<Account>::Instance()->RemoveObject(pNonConstAccount);
+                     IMAPFolderContainer::Instance()->UncacheAccount(pNonConstAccount->GetID());
+
+                     // 2. Thread-Safe Live Refresh for active connections!
+                     // We use a try-catch to ensure we don't accidentally crash the delivery thread
+                     // if the Admin GUI is currently locking the folder list.
+                     try
+                     {
+                        // By refreshing the local pointer, we update the memory 
+                        // for the SMTP Deliverer so it doesn't assert(0).
+                        pFolders->Refresh();
+                        pTrash = pFolders->GetItemByName("Trash");
+                     }
+                     catch (...)
+                     {
+                        String sLogMessage = Formatter::Format("SMTPDeliverer - Failed to save 'Trash' folder in database for account {0}.", pNonConstAccount->GetAddress());
+                     }
+                  }
+                  else
+                  {
+                     String sLogMessage = Formatter::Format("SMTPDeliverer - Failed to create 'Trash' folder in database for account {0}.", pNonConstAccount->GetAddress());
+                     ErrorManager::Instance()->ReportError(ErrorManager::High, 5014, "LocalDelivery", sLogMessage);
+                  }
+               }
+
+               // 3. Move message to Trash if folder is available
+               if (pTrash)
+               {
+                  // Prepare the forwarding information headers
+                  std::vector<std::pair<AnsiString, AnsiString>> forwardHeaders;
+
+                  // Add headers to track why this is in the Trash
+                  forwardHeaders.push_back(std::make_pair("X-FWO-TO", account->GetForwardAddress()));
+
+                  // Write headers to the physical file
+                  const String fileName = PersistentMessage::GetFileName(account, accountLevelMessage);
+                  TraceHeaderWriter writer;
+                  writer.Write(fileName, accountLevelMessage, forwardHeaders);
+
+                  accountLevelMessage->SetFolderID(pTrash->GetID());
+                  bMovedToTrash = true;
+               }
             }
          }
 
-         // If we didn't move it to Trash (or Trash didn't exist), use original behavior (delete)
+         // If we didn't move it to Trash, use original behavior (delete)
          if (!bMovedToTrash)
          {
             // Log why it wasn't delivered
