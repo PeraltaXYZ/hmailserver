@@ -371,8 +371,19 @@ namespace HM
       std::shared_ptr<IMAPFolder> inbox = std::shared_ptr<IMAPFolder>(new IMAPFolder(account.GetID(), -1));
       inbox->SetFolderName("INBOX");
       inbox->SetIsSubscribed(true);
+      if (!PersistentIMAPFolder::SaveObject(inbox)) return false;
 
-      return PersistentIMAPFolder::SaveObject(inbox);
+      std::shared_ptr<IMAPFolder> junk = std::make_shared<IMAPFolder>(account.GetID(), -1);
+      junk->SetFolderName("Junk");
+      junk->SetIsSubscribed(true);
+      if (!PersistentIMAPFolder::SaveObject(junk)) return false;
+
+      std::shared_ptr<IMAPFolder> trash = std::make_shared<IMAPFolder>(account.GetID(), -1);
+      trash->SetFolderName("Trash");
+      trash->SetIsSubscribed(true);
+      if (!PersistentIMAPFolder::SaveObject(trash)) return false;
+
+      return true;
    }
 
    bool 

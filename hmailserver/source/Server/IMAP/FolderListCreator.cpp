@@ -135,7 +135,17 @@ namespace HM
 
       if (!isSelectable)
          nameAttributes += " \\Noselect";
+      
+      // RFC 6154: Advertise special-use attributes if the folder name matches.
+      if (currentFolder)
+      {
+         if (currentFolder->GetFolderName().CompareNoCase(_T("Junk")) == 0)
+            nameAttributes += " \\Junk";
 
+         if (currentFolder->GetFolderName().CompareNoCase(_T("Trash")) == 0)
+            nameAttributes += " \\Trash";
+
+      }
       // Workaround for Outlook "feature".
       AdjustCaseToClientCase_(sFullPath, sWildcard, hierarchyDelimiter);
 
